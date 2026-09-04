@@ -24,13 +24,10 @@ const I18N = {
       "Kecil lebih baik — makin besar lubangnya, makin banyak yang harus ditebak.",
     "field.quality": "Kualitas encode",
     "field.qualityNote": "Makin kecil makin bagus, tapi filenya makin besar.",
-    "btn.detect": "Carikan watermark-nya",
+    "corners.label": "Tandai pojok",
+    "corners.note": "Veo dan Gemini menaruh mark-nya di pojok kanan bawah.",
     "why.paintFirst":
       "Coret dulu watermark-nya — tombolnya menyala begitu ada yang ditandai.",
-    "st.detecting": "Mencari watermark…",
-    "st.found": "Ketemu:",
-    "err.notFound":
-      "Watermark tidak ketemu otomatis. Coret manual saja — biasanya di salah satu pojok.",
     "btn.undo": "Undo",
     "btn.clear": "Bersihkan coretan",
     "btn.run": "Hapus watermark",
@@ -130,13 +127,10 @@ const EN_FALLBACK = {
   "err.generic": "Could not process that file.",
   "err.delogoMoving": "Nothing is painted yet.",
 
-  "btn.detect": "Find the watermark for me",
+  "corners.label": "Mark a corner",
+  "corners.note": "Veo and Gemini put their mark in the bottom-right corner.",
   "why.paintFirst":
     "Paint over the watermark first — the button turns on once something is marked.",
-  "st.detecting": "Looking for the watermark…",
-  "st.found": "Found:",
-  "err.notFound":
-    "No watermark found automatically. Paint over it by hand — it is usually in a corner.",
 
   "pick.image": "Choose image",
   "pick.video": "Choose video",

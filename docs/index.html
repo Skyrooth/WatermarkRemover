@@ -6,7 +6,7 @@
 <title>WMR — Watermark Remover</title>
 <meta name="description" content="Remove watermarks from images and video in your browser. Nothing is uploaded, nothing to install.">
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🧽</text></svg>">
-<link rel="stylesheet" href="style.css?v=6">
+<link rel="stylesheet" href="style.css?v=8">
 </head>
 <body>
 
@@ -69,7 +69,16 @@
       <small class="muted" data-i18n="field.qualityNote">Lower is better quality but a larger file.</small>
     </label>
 
-    <button type="button" id="detect" class="block" data-i18n="btn.detect" hidden>Find the watermark for me</button>
+    <div class="corners" id="corners" hidden>
+      <span class="corners-label" data-i18n="corners.label">Mark a corner</span>
+      <div class="corners-grid">
+        <button type="button" data-corner="tl" title="Top left">◜</button>
+        <button type="button" data-corner="tr" title="Top right">◝</button>
+        <button type="button" data-corner="bl" title="Bottom left">◟</button>
+        <button type="button" data-corner="br" title="Bottom right">◞</button>
+      </div>
+      <small class="muted" data-i18n="corners.note">Veo and Gemini put their mark in the bottom-right corner.</small>
+    </div>
 
     <div class="row">
       <button type="button" id="undo" data-i18n="btn.undo" disabled>Undo</button>
@@ -137,7 +146,7 @@
   <p data-i18n="footer.html">MIT · <a href="https://github.com/Skyrooth/WatermarkRemover">Source code</a></p>
 </footer>
 
-<script src="i18n.js?v=6"></script>
-<script src="app.js?v=6"></script>
+<script src="i18n.js?v=8"></script>
+<script src="app.js?v=8"></script>
 </body>
 </html>

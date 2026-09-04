@@ -277,6 +277,18 @@ button.link:hover { text-decoration: underline; }
 
 .note { font-size: 12px; color: var(--muted); margin: 0; }
 
+.corners { display: grid; gap: 6px; }
+.corners-label { font-size: 13px; color: var(--muted); }
+.corners-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 6px; }
+
+.corners-grid button {
+  font-size: 20px;
+  line-height: 1;
+  padding: 8px 0;
+}
+
+.corners small { font-size: 12px; line-height: 1.4; }
+
 .why {
   font-size: 12px;
   line-height: 1.45;
