@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>WMR — Watermark Remover</title>
-<meta name="description" content="Hapus watermark dari gambar langsung di browser. Tanpa upload, tanpa install — MI-GAN berjalan di perangkat kamu sendiri.">
+<meta name="description" content="Hapus watermark dari gambar dan video langsung di browser. Tanpa upload, tanpa install.">
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🧽</text></svg>">
 <link rel="stylesheet" href="style.css">
 </head>
@@ -13,21 +13,25 @@
 <header>
   <h1>WMR <span class="tag">web</span></h1>
   <p class="lede">
-    Hapus watermark dari gambar langsung di browser.
-    <strong>Tidak ada file yang di-upload</strong> — modelnya diunduh ke perangkat kamu
-    dan seluruh prosesnya jalan di sini.
+    Hapus watermark dari <strong>gambar</strong> dan <strong>video</strong> langsung di browser.
+    Tidak ada file yang di-upload — semuanya diproses di perangkat kamu.
   </p>
 </header>
+
+<nav class="tabs" role="tablist">
+  <button type="button" class="tab active" data-mode="image" role="tab">Gambar</button>
+  <button type="button" class="tab" data-mode="video" role="tab">Video</button>
+</nav>
 
 <main>
   <section id="stage" class="panel">
     <div id="dropzone">
       <input type="file" id="file" accept="image/*" hidden>
       <div class="drop-inner">
-        <div class="drop-icon">🖼️</div>
+        <div class="drop-icon" id="dropIcon">🖼️</div>
         <p><button type="button" id="pick" class="primary">Pilih gambar</button></p>
-        <p class="muted">atau seret gambar ke sini · tempel dengan Ctrl+V</p>
-        <p><button type="button" id="demo" class="link">Coba pakai gambar contoh →</button></p>
+        <p class="muted">atau seret ke sini · tempel dengan Ctrl+V</p>
+        <p><button type="button" id="demo" class="link">Coba pakai contoh →</button></p>
       </div>
     </div>
 
@@ -36,7 +40,8 @@
         <canvas id="base"></canvas>
         <canvas id="overlay"></canvas>
       </div>
-      <p class="hint">Coret watermark-nya. Yang tertutup merah akan diganti.</p>
+      <p class="hint" id="hint">Coret watermark-nya. Yang tertutup merah akan diganti.</p>
+      <video id="result" controls hidden playsinline></video>
     </div>
   </section>
 
@@ -49,7 +54,13 @@
     <label class="field">
       <span>Perbesar mask <b id="growVal">3</b> px</span>
       <input type="range" id="grow" min="0" max="20" value="3">
-      <small class="muted">Kecil lebih baik — makin besar lubangnya, makin banyak yang harus ditebak model.</small>
+      <small class="muted">Kecil lebih baik — makin besar lubangnya, makin banyak yang harus ditebak.</small>
+    </label>
+
+    <label class="field" id="crfField" hidden>
+      <span>Kualitas encode <b id="crfVal">20</b></span>
+      <input type="range" id="crf" min="14" max="30" value="20">
+      <small class="muted">Makin kecil makin bagus, tapi filenya makin besar.</small>
     </label>
 
     <div class="row">
@@ -61,15 +72,13 @@
 
     <div id="status" class="status" hidden>
       <div class="bar"><i id="barFill"></i></div>
-      <span id="statusText">Memuat model…</span>
+      <span id="statusText">Memuat…</span>
     </div>
 
-    <div class="row">
-      <button type="button" id="download" class="block" disabled>Download hasil</button>
-    </div>
-    <button type="button" id="reset" class="link" hidden>Mulai dengan gambar lain</button>
+    <button type="button" id="download" class="block" disabled>Download hasil</button>
+    <button type="button" id="reset" class="link" hidden>Mulai dengan file lain</button>
 
-    <p class="note" id="engineNote">Model MI-GAN (30 MB) diunduh sekali lalu di-cache browser.</p>
+    <p class="note" id="engineNote">Gambar: MI-GAN (30 MB). Video: ffmpeg (32 MB). Diunduh sekali lalu di-cache browser.</p>
   </aside>
 </main>
 
@@ -77,30 +86,42 @@
   <h2>Cara kerjanya</h2>
   <p>
     Watermark tidak bisa "dibalik" kecuali logonya sudah diketahui persis. Yang bisa
-    dilakukan adalah <em>inpainting</em>: area yang kamu tandai dibuang, lalu diisi ulang
-    berdasarkan piksel di sekitarnya. Halaman ini memakai <strong>MI-GAN</strong> lewat
-    <code>onnxruntime-web</code>, berjalan penuh di browser kamu.
+    dilakukan adalah membuang area yang kamu tandai lalu mengisinya kembali dari
+    piksel di sekitarnya.
   </p>
+  <ul>
+    <li>
+      <strong>Gambar</strong> — <em>inpainting</em> dengan model <strong>MI-GAN</strong>
+      lewat <code>onnxruntime-web</code>. Sekitar 1,6 detik per gambar.
+    </li>
+    <li>
+      <strong>Video</strong> — filter <strong><code>delogo</code></strong> milik ffmpeg,
+      dijalankan sebagai WebAssembly. Tiap frame diinterpolasi dari tepi kotak yang kamu
+      tandai. Audio aslinya disalin apa adanya, tanpa encode ulang.
+    </li>
+  </ul>
   <p>
-    Yang dikirim ke model bukan seluruh gambar, melainkan potongan di sekitar mask —
-    konteks secukupnya, jauh lebih cepat, dan hasilnya lebih tajam. Tepi tambalannya
-    di-<em>feather</em> supaya sambungannya tidak terlihat.
+    Untuk watermark kecil semi-transparan yang posisinya tetap — persis seperti
+    watermark Veo/Gemini — <code>delogo</code> justru lebih akurat daripada inpainting AI
+    dalam pengukuran kami, dan jauh lebih cepat.
   </p>
 
-  <h2>Butuh video, atau kualitas tertinggi?</h2>
+  <h2>Batasannya</h2>
+  <ul>
+    <li>Video diproses satu thread. GitHub Pages tidak bisa mengirim header <code>COOP/COEP</code> yang dibutuhkan ffmpeg versi multi-thread, jadi klip panjang akan lama. Untuk klip panjang, pakai versi desktop.</li>
+    <li>Watermark video yang <strong>berpindah posisi</strong> hanya ditangani versi desktop, yang melacaknya per frame.</li>
+    <li>Yang dihapus hanya watermark <strong>visual</strong>. Watermark tak-kasat-mata seperti SynthID tidak disentuh.</li>
+  </ul>
+
+  <h2>Versi desktop</h2>
   <p>
-    Versi desktop-nya menangani <strong>video</strong> (termasuk watermark yang bergerak,
-    dilacak per frame) dan punya engine <strong>LaMa</strong> yang lebih akurat, plus
-    <code>delogo</code> ffmpeg yang real-time. Kodenya ada di
+    Lebih cepat dan lebih lengkap: engine <strong>LaMa</strong> untuk kualitas tertinggi,
+    <strong>MI-GAN di GPU</strong> untuk video (klip 6 detik selesai dalam 26 detik), dan
+    pelacakan watermark bergerak. Ada di
     <a href="https://github.com/Skyrooth/WatermarkRemover">github.com/Skyrooth/WatermarkRemover</a>.
   </p>
 
-  <h2>Catatan</h2>
-  <ul>
-    <li>Yang dihapus hanya watermark <strong>visual</strong>. Watermark tak-kasat-mata seperti SynthID tidak disentuh.</li>
-    <li>Tandai watermark seketat mungkin — hasilnya lebih baik daripada menandai area lebar.</li>
-    <li>Pakai untuk konten milik sendiri atau yang kamu punya izinnya.</li>
-  </ul>
+  <p class="muted"><small>Pakai untuk konten milik sendiri atau yang kamu punya izinnya.</small></p>
 </section>
 
 <footer>

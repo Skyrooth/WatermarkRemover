@@ -1,15 +1,26 @@
-/* WMR web — MI-GAN inpainting in the browser.
+/* WMR web — watermark removal in the browser, no upload.
  *
- * Mirrors wmr/engines.py: crop around the mask, match the model aspect, resize,
- * inpaint, resize back, feather the seam. Including the halo fix — resampling smears
- * the watermark a pixel or two past its own edge, and any of that left outside the
- * hole gets read as valid context and pulled back into the fill.
+ * Images  : MI-GAN inpainting through onnxruntime-web.
+ * Video   : ffmpeg's own delogo filter compiled to WebAssembly.
+ *
+ * The image path mirrors wmr/engines.py — crop around the mask, match the model
+ * aspect, resize, inpaint, resize back, feather the seam — including the halo fix:
+ * resampling smears the watermark a pixel or two past its own edge, and any of that
+ * left outside the hole gets read as valid context and pulled back into the fill.
  */
 
-const MODEL_URL = "models/migan.onnx";
 const ORT_DIR = "https://cdn.jsdelivr.net/npm/onnxruntime-web@1.20.1/dist/";
 const ORT_CPU = ORT_DIR + "ort.min.js";
 const ORT_GPU = ORT_DIR + "ort.webgpu.min.js";
+const MODEL_URL = "models/migan.onnx";
+
+// ffmpeg is served from this site, not a CDN. Its worker is a module with relative
+// imports, so handing it over as a cross-origin blob URL makes the worker fail to
+// spawn at all — and ffmpeg.load() then hangs with no error. Same-origin avoids the
+// whole class of problem, and keeps the "nothing leaves your device" claim literal.
+const FFMPEG_DIR = "ffmpeg/";
+const FFMPEG_LOAD_TIMEOUT_MS = 120000;
+
 const MODEL_SIZE = 512;
 const MARGIN_RATIO = 0.75;
 const MIN_MARGIN = 64;
@@ -23,22 +34,27 @@ const baseCtx = base.getContext("2d", { willReadFrequently: true });
 const overlayCtx = overlay.getContext("2d", { willReadFrequently: true });
 
 const state = {
-  image: null,
+  mode: "image",
   strokes: [],
   current: null,
   drawing: false,
   session: null,
-  loading: null,
+  backend: null,
+  loadingSession: null,
+  ffmpeg: null,
+  loadingFfmpeg: null,
+  videoFile: null,
   resultUrl: null,
+  resultBlob: null,
+  resultName: "wmr-clean.png",
 };
 
-/* ---------- small helpers ------------------------------------------------ */
+/* ---------- status and errors -------------------------------------------- */
 
 function setStatus(text, fraction) {
-  const box = el("status");
-  box.hidden = false;
+  el("status").hidden = false;
   el("statusText").textContent = text;
-  el("barFill").style.width = `${Math.round((fraction ?? 0) * 100)}%`;
+  el("barFill").style.width = `${Math.round(Math.min(1, Math.max(0, fraction ?? 0)) * 100)}%`;
 }
 
 function clearStatus() {
@@ -69,19 +85,22 @@ function makeCanvas(w, h) {
   return c;
 }
 
-/* ---------- mask maths (ports of wmr/engines.py) -------------------------- */
+const nextFrame = () => new Promise((r) => requestAnimationFrame(r));
+
+/* ---------- mask maths (ports of wmr/mask.py and wmr/engines.py) ---------- */
 
 /** Separable max filter: dilating a binary mask by `radius` pixels. */
 function dilate(mask, w, h, radius) {
   if (radius <= 0) return mask;
-  const pass = (src) => {
+
+  const sweep = (src, width, height) => {
     const out = new Uint8Array(src.length);
-    for (let y = 0; y < h; y++) {
-      const row = y * w;
-      for (let x = 0; x < w; x++) {
-        let hit = 0;
+    for (let y = 0; y < height; y++) {
+      const row = y * width;
+      for (let x = 0; x < width; x++) {
         const lo = Math.max(0, x - radius);
-        const hi = Math.min(w - 1, x + radius);
+        const hi = Math.min(width - 1, x + radius);
+        let hit = 0;
         for (let i = lo; i <= hi && !hit; i++) hit = src[row + i];
         out[row + x] = hit;
       }
@@ -89,20 +108,19 @@ function dilate(mask, w, h, radius) {
     return out;
   };
 
-  // Horizontal pass, then the same pass on the transpose = vertical pass.
-  const transpose = (src, sw, sh) => {
+  const transpose = (src, width, height) => {
     const out = new Uint8Array(src.length);
-    for (let y = 0; y < sh; y++) {
-      for (let x = 0; x < sw; x++) out[x * sh + y] = src[y * sw + x];
+    for (let y = 0; y < height; y++) {
+      for (let x = 0; x < width; x++) out[x * height + y] = src[y * width + x];
     }
     return out;
   };
 
-  let work = pass(mask);
+  // Horizontal sweep, then the same sweep on the transpose = vertical sweep.
+  let work = sweep(mask, w, h);
   work = transpose(work, w, h);
-  [w, h] = [h, w];
-  work = pass(work);
-  return transpose(work, w, h);
+  work = sweep(work, h, w);
+  return transpose(work, h, w);
 }
 
 function maskBounds(mask, w, h) {
@@ -121,6 +139,40 @@ function maskBounds(mask, w, h) {
   return x1 < 0 ? null : { x0, y0, x1, y1 };
 }
 
+/** Connected components as boxes, so two separate logos stay two separate boxes. */
+function maskBoxes(mask, w, h, minArea = 24) {
+  const seen = new Uint8Array(mask.length);
+  const boxes = [];
+  const stack = [];
+
+  for (let start = 0; start < mask.length; start++) {
+    if (!mask[start] || seen[start]) continue;
+
+    let x0 = start % w, x1 = x0, y0 = (start / w) | 0, y1 = y0, area = 0;
+    stack.push(start);
+    seen[start] = 1;
+
+    while (stack.length) {
+      const index = stack.pop();
+      const x = index % w;
+      const y = (index / w) | 0;
+      area++;
+      if (x < x0) x0 = x;
+      if (x > x1) x1 = x;
+      if (y < y0) y0 = y;
+      if (y > y1) y1 = y;
+
+      if (x > 0 && mask[index - 1] && !seen[index - 1]) { seen[index - 1] = 1; stack.push(index - 1); }
+      if (x < w - 1 && mask[index + 1] && !seen[index + 1]) { seen[index + 1] = 1; stack.push(index + 1); }
+      if (y > 0 && mask[index - w] && !seen[index - w]) { seen[index - w] = 1; stack.push(index - w); }
+      if (y < h - 1 && mask[index + w] && !seen[index + w]) { seen[index + w] = 1; stack.push(index + w); }
+    }
+
+    if (area >= minArea) boxes.push({ x: x0, y: y0, w: x1 - x0 + 1, h: y1 - y0 + 1 });
+  }
+  return boxes;
+}
+
 /** Context window around the mask, then squared off to the model's aspect. */
 function cropWindow(bounds, w, h) {
   const bw = bounds.x1 - bounds.x0 + 1;
@@ -133,7 +185,6 @@ function cropWindow(bounds, w, h) {
   let cw = Math.min(w, bounds.x1 + 1 + mx) - x;
   let ch = Math.min(h, bounds.y1 + 1 + my) - y;
 
-  // Square it up so nothing gets squashed on the way into the model.
   if (ch > cw) {
     const target = Math.min(ch, w);
     x = Math.max(0, Math.min(x - ((target - cw) >> 1), w - target));
@@ -146,13 +197,31 @@ function cropWindow(bounds, w, h) {
   return { x, y, w: cw, h: ch };
 }
 
-/* ---------- model -------------------------------------------------------- */
+/** The painted overlay's alpha channel, as a binary mask grown by `grow` px. */
+function currentMask() {
+  const w = base.width;
+  const h = base.height;
+  const painted = overlayCtx.getImageData(0, 0, w, h).data;
+  let mask = new Uint8Array(w * h);
+  let any = false;
+  for (let i = 0, p = 3; i < mask.length; i++, p += 4) {
+    if (painted[p] > 8) {
+      mask[i] = 1;
+      any = true;
+    }
+  }
+  if (!any) throw new Error("Belum ada area yang dicoret.");
+  const grow = Number(el("grow").value);
+  return grow > 0 ? dilate(mask, w, h, grow) : mask;
+}
+
+/* ---------- image path: MI-GAN ------------------------------------------- */
 
 /** Pick the onnxruntime build to load.
  *
  * The WebGPU bundle ships a different wasm binary that is ~4x slower on the CPU path,
  * so loading it "just in case" penalises every visitor without a working GPU. Ask for
- * a real adapter first - `navigator.gpu` existing is not the same as WebGPU working.
+ * a real adapter first — `navigator.gpu` existing is not the same as WebGPU working.
  */
 async function loadRuntime() {
   let gpu = false;
@@ -178,9 +247,9 @@ async function loadRuntime() {
 
 async function loadSession() {
   if (state.session) return state.session;
-  if (state.loading) return state.loading;
+  if (state.loadingSession) return state.loadingSession;
 
-  state.loading = (async () => {
+  state.loadingSession = (async () => {
     const gpu = await loadRuntime();
 
     setStatus("Mengunduh model MI-GAN…", 0);
@@ -196,10 +265,8 @@ async function loadSession() {
       if (done) break;
       chunks.push(value);
       received += value.length;
-      setStatus(
-        `Mengunduh model… ${(received / 1e6).toFixed(1)} MB`,
-        total ? (received / total) * 0.9 : 0.5
-      );
+      setStatus(`Mengunduh model… ${(received / 1e6).toFixed(1)} MB`,
+        total ? (received / total) * 0.9 : 0.5);
     }
 
     const bytes = new Uint8Array(received);
@@ -210,9 +277,7 @@ async function loadSession() {
     }
 
     setStatus("Menyiapkan model…", 0.95);
-
-    const backends = gpu ? ["webgpu", "wasm"] : ["wasm"];
-    for (const backend of backends) {
+    for (const backend of gpu ? ["webgpu", "wasm"] : ["wasm"]) {
       try {
         state.session = await ort.InferenceSession.create(bytes.buffer, {
           executionProviders: [backend],
@@ -225,66 +290,44 @@ async function loadSession() {
       }
     }
     if (!state.session) throw new Error("Model tidak bisa dijalankan di browser ini.");
-
-    el("engineNote").textContent =
-      `MI-GAN berjalan di ${state.backend === "webgpu" ? "GPU (WebGPU)" : "CPU (WebAssembly)"}.`;
     return state.session;
   })();
 
   try {
-    return await state.loading;
+    return await state.loadingSession;
   } finally {
-    state.loading = null;
+    state.loadingSession = null;
   }
 }
 
-/* ---------- the pipeline ------------------------------------------------- */
-
-async function inpaint() {
+async function inpaintImage() {
   const W = base.width;
   const H = base.height;
-
-  // The overlay's alpha channel is the mask the user painted.
-  const painted = overlayCtx.getImageData(0, 0, W, H).data;
-  let mask = new Uint8Array(W * H);
-  let any = false;
-  for (let i = 0, p = 3; i < mask.length; i++, p += 4) {
-    if (painted[p] > 8) {
-      mask[i] = 1;
-      any = true;
-    }
-  }
-  if (!any) throw new Error("Belum ada area yang dicoret.");
-
-  const grow = Number(el("grow").value);
-  if (grow > 0) mask = dilate(mask, W, H, grow);
-
+  const mask = currentMask();
   const crop = cropWindow(maskBounds(mask, W, H), W, H);
+
   const session = await loadSession();
   setStatus("Menghapus watermark…", 0.4);
-  await new Promise((r) => requestAnimationFrame(r));
+  await nextFrame();
 
-  // Crop -> model resolution.
   const small = makeCanvas(MODEL_SIZE, MODEL_SIZE);
   const smallCtx = small.getContext("2d", { willReadFrequently: true });
   smallCtx.imageSmoothingQuality = "high";
   smallCtx.drawImage(base, crop.x, crop.y, crop.w, crop.h, 0, 0, MODEL_SIZE, MODEL_SIZE);
   const smallPixels = smallCtx.getImageData(0, 0, MODEL_SIZE, MODEL_SIZE).data;
 
-  // The mask takes the same trip, but any partial coverage counts as hole and the
-  // result is dilated: that is what keeps the resampling halo out of the context.
   const maskFull = makeCanvas(W, H);
   const maskFullCtx = maskFull.getContext("2d");
   const maskImage = maskFullCtx.createImageData(W, H);
   for (let i = 0, p = 0; i < mask.length; i++, p += 4) {
     const v = mask[i] ? 255 : 0;
-    maskImage.data[p] = v;
-    maskImage.data[p + 1] = v;
-    maskImage.data[p + 2] = v;
+    maskImage.data[p] = maskImage.data[p + 1] = maskImage.data[p + 2] = v;
     maskImage.data[p + 3] = 255;
   }
   maskFullCtx.putImageData(maskImage, 0, 0);
 
+  // The mask takes the same trip, but partial coverage counts as hole and the result
+  // is dilated: that keeps the resampling halo out of the model's context.
   const maskSmall = makeCanvas(MODEL_SIZE, MODEL_SIZE);
   const maskSmallCtx = maskSmall.getContext("2d", { willReadFrequently: true });
   maskSmallCtx.imageSmoothingQuality = "high";
@@ -314,9 +357,8 @@ async function inpaint() {
   const filled = output[session.outputNames[0]].data;
 
   setStatus("Menyusun hasil…", 0.85);
-  await new Promise((r) => requestAnimationFrame(r));
+  await nextFrame();
 
-  // Model output -> back to crop resolution.
   const outSmall = makeCanvas(MODEL_SIZE, MODEL_SIZE);
   const outSmallCtx = outSmall.getContext("2d");
   const outImage = outSmallCtx.createImageData(MODEL_SIZE, MODEL_SIZE);
@@ -334,7 +376,6 @@ async function inpaint() {
   outCropCtx.drawImage(outSmall, 0, 0, crop.w, crop.h);
   const repaired = outCropCtx.getImageData(0, 0, crop.w, crop.h);
 
-  // Feathered mask at crop resolution, so the patch has no hard edge.
   const feather = makeCanvas(crop.w, crop.h);
   const featherCtx = feather.getContext("2d", { willReadFrequently: true });
   featherCtx.filter = `blur(${FEATHER_PX}px)`;
@@ -349,6 +390,116 @@ async function inpaint() {
     }
   }
   baseCtx.putImageData(original, crop.x, crop.y);
+
+  await new Promise((resolve) => base.toBlob((blob) => {
+    state.resultBlob = blob;
+    state.resultName = "wmr-clean.png";
+    resolve();
+  }, "image/png"));
+}
+
+/* ---------- video path: ffmpeg delogo ------------------------------------ */
+
+async function loadFfmpeg() {
+  if (state.ffmpeg) return state.ffmpeg;
+  if (state.loadingFfmpeg) return state.loadingFfmpeg;
+
+  state.loadingFfmpeg = (async () => {
+    setStatus("Memuat ffmpeg…", 0.02);
+    await new Promise((resolve, reject) => {
+      const script = document.createElement("script");
+      script.src = `${FFMPEG_DIR}ffmpeg.js`;
+      script.onload = resolve;
+      script.onerror = () => reject(new Error("ffmpeg.js gagal dimuat."));
+      document.head.append(script);
+    });
+
+    const ffmpeg = new FFmpegWASM.FFmpeg();
+    ffmpeg.on("log", ({ message }) => console.debug("[ffmpeg]", message));
+
+    setStatus("Menyiapkan ffmpeg (32 MB)…", 0.1);
+    // Absolute URLs: the worker resolves these against its own location, not the page,
+    // so a relative path here becomes "Cannot find module".
+    const absolute = (name) => new URL(FFMPEG_DIR + name, location.href).href;
+
+    // A bad core/worker pairing hangs instead of throwing, so cap the wait.
+    await Promise.race([
+      ffmpeg.load({
+        coreURL: absolute("ffmpeg-core.js"),
+        wasmURL: absolute("ffmpeg-core.wasm"),
+      }),
+      new Promise((_, reject) =>
+        setTimeout(() => reject(new Error("ffmpeg tidak selesai dimuat. Coba muat ulang halaman.")),
+          FFMPEG_LOAD_TIMEOUT_MS)),
+    ]);
+    state.ffmpeg = ffmpeg;
+    return ffmpeg;
+  })();
+
+  try {
+    return await state.loadingFfmpeg;
+  } finally {
+    state.loadingFfmpeg = null;
+  }
+}
+
+/** delogo refuses boxes touching the frame border, so keep 1px of margin. */
+function delogoFilter(boxes, width, height) {
+  return boxes
+    .map((box) => {
+      const x = Math.max(1, box.x);
+      const y = Math.max(1, box.y);
+      const w = Math.max(1, Math.min(box.w, width - x - 1));
+      const h = Math.max(1, Math.min(box.h, height - y - 1));
+      return `delogo=x=${x}:y=${y}:w=${w}:h=${h}`;
+    })
+    .join(",");
+}
+
+async function processVideo() {
+  const mask = currentMask();
+  const boxes = maskBoxes(mask, base.width, base.height);
+  if (!boxes.length) throw new Error("Coretannya terlalu kecil untuk dikenali.");
+
+  const ffmpeg = await loadFfmpeg();
+
+  setStatus("Menyiapkan video…", 0.3);
+  await ffmpeg.writeFile("in.mp4", new Uint8Array(await state.videoFile.arrayBuffer()));
+
+  const onProgress = ({ progress }) =>
+    setStatus(`Memproses video… ${Math.round(progress * 100)}%`, 0.35 + progress * 0.6);
+  ffmpeg.on("progress", onProgress);
+
+  try {
+    const code = await ffmpeg.exec([
+      "-i", "in.mp4",
+      "-vf", delogoFilter(boxes, base.width, base.height),
+      "-c:v", "libx264",
+      "-preset", "veryfast",
+      "-crf", String(el("crf").value),
+      "-pix_fmt", "yuv420p",
+      "-c:a", "copy",
+      "-movflags", "+faststart",
+      "out.mp4",
+    ]);
+    if (code !== 0) throw new Error(`ffmpeg gagal (kode ${code}). Coba format video lain.`);
+  } finally {
+    ffmpeg.off("progress", onProgress);
+  }
+
+  setStatus("Menyusun hasil…", 0.97);
+  const data = await ffmpeg.readFile("out.mp4");
+  await ffmpeg.deleteFile("in.mp4").catch(() => {});
+  await ffmpeg.deleteFile("out.mp4").catch(() => {});
+
+  state.resultBlob = new Blob([data.buffer], { type: "video/mp4" });
+  state.resultName = "wmr-clean.mp4";
+
+  if (state.resultUrl) URL.revokeObjectURL(state.resultUrl);
+  state.resultUrl = URL.createObjectURL(state.resultBlob);
+  const player = el("result");
+  player.src = state.resultUrl;
+  player.hidden = false;
 }
 
 /* ---------- painting ----------------------------------------------------- */
@@ -358,16 +509,17 @@ function redrawOverlay() {
   overlayCtx.strokeStyle = "rgba(255, 45, 85, 0.55)";
   overlayCtx.lineCap = "round";
   overlayCtx.lineJoin = "round";
+
   for (const stroke of state.strokes) {
     overlayCtx.lineWidth = stroke.size;
     overlayCtx.beginPath();
-    stroke.points.forEach(([x, y], i) => {
-      if (i === 0) overlayCtx.moveTo(x, y);
-      else overlayCtx.lineTo(x, y);
-    });
-    if (stroke.points.length === 1) overlayCtx.lineTo(stroke.points[0][0] + 0.01, stroke.points[0][1]);
+    stroke.points.forEach(([x, y], i) => (i === 0 ? overlayCtx.moveTo(x, y) : overlayCtx.lineTo(x, y)));
+    if (stroke.points.length === 1) {
+      overlayCtx.lineTo(stroke.points[0][0] + 0.01, stroke.points[0][1]);
+    }
     overlayCtx.stroke();
   }
+
   const has = state.strokes.length > 0;
   el("undo").disabled = !has;
   el("clear").disabled = !has;
@@ -383,10 +535,9 @@ function pointerPosition(event) {
 }
 
 function brushSize() {
-  // The slider is in display pixels; strokes live in image pixels.
+  // The slider is in display pixels; strokes live in source pixels.
   const rect = overlay.getBoundingClientRect();
-  const scale = rect.width ? overlay.width / rect.width : 1;
-  return Number(el("brush").value) * scale;
+  return Number(el("brush").value) * (rect.width ? overlay.width / rect.width : 1);
 }
 
 overlay.addEventListener("pointerdown", (event) => {
@@ -410,41 +561,123 @@ const endStroke = () => {
 overlay.addEventListener("pointerup", endStroke);
 overlay.addEventListener("pointercancel", endStroke);
 
-/* ---------- loading and wiring ------------------------------------------- */
+/* ---------- loading files ------------------------------------------------ */
 
-function loadImage(file) {
-  if (!file || !file.type.startsWith("image/")) return;
+function startEditing() {
+  redrawOverlay();
+  el("dropzone").hidden = true;
+  el("editor").hidden = false;
+  el("reset").hidden = false;
+  el("download").disabled = true;
+  el("result").hidden = true;
+  hideError();
+  clearStatus();
+}
+
+function loadImageFile(file) {
   const reader = new FileReader();
   reader.onload = () => {
     const img = new Image();
     img.onload = () => {
-      state.image = img;
       state.strokes = [];
       base.width = overlay.width = img.naturalWidth;
       base.height = overlay.height = img.naturalHeight;
       baseCtx.drawImage(img, 0, 0);
-      redrawOverlay();
-      el("dropzone").hidden = true;
-      el("editor").hidden = false;
-      el("reset").hidden = false;
-      el("download").disabled = true;
-      hideError();
-      clearStatus();
+      startEditing();
     };
+    img.onerror = () => showError("Gambar tidak bisa dibaca.");
     img.src = reader.result;
   };
   reader.readAsDataURL(file);
 }
 
+function loadVideoFile(file) {
+  const url = URL.createObjectURL(file);
+  const video = document.createElement("video");
+  video.muted = true;
+  video.playsInline = true;
+  video.preload = "auto";
+
+  video.onloadeddata = () => {
+    // A frame from a third of the way in: more representative than a black opener.
+    video.currentTime = Math.min(1, (video.duration || 3) / 3);
+  };
+  video.onseeked = () => {
+    state.strokes = [];
+    state.videoFile = file;
+    base.width = overlay.width = video.videoWidth;
+    base.height = overlay.height = video.videoHeight;
+    baseCtx.drawImage(video, 0, 0);
+    URL.revokeObjectURL(url);
+    startEditing();
+    el("hint").textContent =
+      `Coret watermark-nya. Mask ini dipakai untuk seluruh video — ` +
+      `${video.videoWidth}×${video.videoHeight}, ${(video.duration || 0).toFixed(1)} detik.`;
+  };
+  video.onerror = () => {
+    URL.revokeObjectURL(url);
+    showError("Video tidak bisa dibaca. Coba MP4 (H.264).");
+  };
+  video.src = url;
+}
+
+function loadFile(file) {
+  if (!file) return;
+  hideError();
+  if (state.mode === "video") {
+    if (!file.type.startsWith("video/")) return showError("Pilih file video.");
+    loadVideoFile(file);
+  } else {
+    if (!file.type.startsWith("image/")) return showError("Pilih file gambar.");
+    loadImageFile(file);
+  }
+}
+
+/* ---------- mode switching ----------------------------------------------- */
+
+function setMode(mode) {
+  state.mode = mode;
+  document.querySelectorAll(".tab").forEach((tab) =>
+    tab.classList.toggle("active", tab.dataset.mode === mode));
+
+  const video = mode === "video";
+  el("file").accept = video ? "video/*" : "image/*";
+  el("pick").textContent = video ? "Pilih video" : "Pilih gambar";
+  el("dropIcon").textContent = video ? "🎬" : "🖼️";
+  el("crfField").hidden = !video;
+  el("hint").textContent = video
+    ? "Coret watermark-nya. Mask ini dipakai untuk seluruh video."
+    : "Coret watermark-nya. Yang tertutup merah akan diganti.";
+
+  state.strokes = [];
+  state.videoFile = null;
+  el("editor").hidden = true;
+  el("dropzone").hidden = false;
+  el("reset").hidden = true;
+  el("download").disabled = true;
+  el("result").hidden = true;
+  el("file").value = "";
+  hideError();
+  clearStatus();
+}
+
+document.querySelectorAll(".tab").forEach((tab) =>
+  tab.addEventListener("click", () => setMode(tab.dataset.mode)));
+
+/* ---------- wiring ------------------------------------------------------- */
+
 el("pick").addEventListener("click", () => el("file").click());
-el("file").addEventListener("change", (event) => loadImage(event.target.files[0]));
+el("file").addEventListener("change", (event) => loadFile(event.target.files[0]));
 
 el("demo").addEventListener("click", async () => {
   try {
-    const response = await fetch("demo.jpg");
-    loadImage(new File([await response.blob()], "demo.jpg", { type: "image/jpeg" }));
-  } catch (error) {
-    showError("Gambar contoh gagal dimuat.");
+    const name = state.mode === "video" ? "demo.mp4" : "demo.jpg";
+    const response = await fetch(name);
+    if (!response.ok) throw new Error();
+    const blob = await response.blob();
+    loadFile(new File([blob], name, { type: blob.type }));
+  } catch {
+    showError("Contoh gagal dimuat.");
   }
 });
 
@@ -453,23 +686,23 @@ const dropzone = el("dropzone");
   dropzone.addEventListener(name, (event) => {
     event.preventDefault();
     dropzone.classList.add("hot");
-  })
-);
+  }));
 ["dragleave", "drop"].forEach((name) =>
   dropzone.addEventListener(name, (event) => {
     event.preventDefault();
     dropzone.classList.remove("hot");
-  })
-);
-dropzone.addEventListener("drop", (event) => loadImage(event.dataTransfer.files[0]));
+  }));
+dropzone.addEventListener("drop", (event) => loadFile(event.dataTransfer.files[0]));
 
 window.addEventListener("paste", (event) => {
-  const item = [...(event.clipboardData?.items ?? [])].find((i) => i.type.startsWith("image/"));
-  if (item) loadImage(item.getAsFile());
+  const wanted = state.mode === "video" ? "video/" : "image/";
+  const item = [...(event.clipboardData?.items ?? [])].find((i) => i.type.startsWith(wanted));
+  if (item) loadFile(item.getAsFile());
 });
 
 el("brush").addEventListener("input", (e) => (el("brushVal").textContent = e.target.value));
 el("grow").addEventListener("input", (e) => (el("growVal").textContent = e.target.value));
+el("crf").addEventListener("input", (e) => (el("crfVal").textContent = e.target.value));
 
 el("undo").addEventListener("click", () => {
   state.strokes.pop();
@@ -481,45 +714,37 @@ el("clear").addEventListener("click", () => {
   redrawOverlay();
 });
 
-el("reset").addEventListener("click", () => {
-  state.image = null;
-  state.strokes = [];
-  el("editor").hidden = true;
-  el("dropzone").hidden = false;
-  el("reset").hidden = true;
-  el("download").disabled = true;
-  el("file").value = "";
-  clearStatus();
-  hideError();
-});
+el("reset").addEventListener("click", () => setMode(state.mode));
 
 el("run").addEventListener("click", async () => {
-  const button = el("run");
-  button.disabled = true;
+  el("run").disabled = true;
   hideError();
+  const started = performance.now();
   try {
-    await inpaint();
+    if (state.mode === "video") await processVideo();
+    else await inpaintImage();
+
     state.strokes = [];
     redrawOverlay();
     el("download").disabled = false;
-    setStatus("Selesai.", 1);
-    setTimeout(clearStatus, 1800);
+    setStatus(`Selesai dalam ${((performance.now() - started) / 1000).toFixed(1)} detik.`, 1);
   } catch (error) {
     console.error(error);
-    showError(error.message || "Gagal memproses gambar.");
+    showError(error.message || "Gagal memproses file.");
     clearStatus();
   } finally {
-    button.disabled = state.strokes.length === 0;
+    el("run").disabled = state.strokes.length === 0;
   }
 });
 
 el("download").addEventListener("click", () => {
-  base.toBlob((blob) => {
-    if (state.resultUrl) URL.revokeObjectURL(state.resultUrl);
-    state.resultUrl = URL.createObjectURL(blob);
-    const link = document.createElement("a");
-    link.href = state.resultUrl;
-    link.download = "wmr-clean.png";
-    link.click();
-  }, "image/png");
+  if (!state.resultBlob) return;
+  const url = URL.createObjectURL(state.resultBlob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = state.resultName;
+  link.click();
+  setTimeout(() => URL.revokeObjectURL(url), 10000);
 });
+
+setMode("image");
