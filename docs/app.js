@@ -542,8 +542,8 @@ async function processVideo() {
 // Watermarks sit in a corner with padding around them, sized relative to the frame.
 // These proportions cover the Veo/Gemini sparkle on a 720p clip (48x48, inset 96)
 // with room to spare; the mask can always be extended by painting.
-const CORNER_SIZE = 0.13;
-const CORNER_INSET = 0.09;
+const CORNER_SIZE = 0.10;
+const CORNER_INSET = 0.11;
 
 function cornerRect(corner) {
   const short = Math.min(base.width, base.height);
