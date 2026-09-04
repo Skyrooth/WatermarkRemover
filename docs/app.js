@@ -106,7 +106,22 @@ function makeCanvas(w, h) {
   return c;
 }
 
-const nextFrame = () => new Promise((r) => requestAnimationFrame(r));
+/** Yield to the browser so the status can repaint.
+ *
+ * A background tab never paints, so `requestAnimationFrame` alone would never fire
+ * and the whole pipeline would stall the moment someone switches tabs. The timer is
+ * the guarantee that this always resolves.
+ */
+const nextFrame = () => new Promise((resolve) => {
+  let settled = false;
+  const finish = () => {
+    if (settled) return;
+    settled = true;
+    resolve();
+  };
+  requestAnimationFrame(finish);
+  setTimeout(finish, 250);
+});
 
 /* ---------- mask maths (ports of wmr/mask.py and wmr/engines.py) ---------- */
 
@@ -549,6 +564,9 @@ async function sampleFrames(video, ctx, w, h, onProgress) {
       };
       video.requestVideoFrameCallback(step);
       video.onended = resolve;
+      // Frame callbacks stop in a background tab and autoplay can be refused
+      // outright; either way, give up and fall through to seeking.
+      setTimeout(resolve, 15000);
     });
     await video.play().catch(() => {});
     await done;
