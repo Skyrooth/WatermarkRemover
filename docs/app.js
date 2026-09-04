@@ -644,13 +644,18 @@ function loadVideoFile(file) {
 function loadFile(file) {
   if (!file) return;
   hideError();
-  if (state.mode === "video") {
-    if (!file.type.startsWith("video/")) return showError(t("err.pickVideo"));
-    loadVideoFile(file);
-  } else {
-    if (!file.type.startsWith("image/")) return showError(t("err.pickImage"));
-    loadImageFile(file);
-  }
+
+  const isVideo = file.type.startsWith("video/");
+  const isImage = file.type.startsWith("image/");
+  if (!isVideo && !isImage) return showError(t("err.pickFile"));
+
+  // Follow the file rather than scolding the user: dropping a video while the Image
+  // tab happens to be open should just switch tabs.
+  const wanted = isVideo ? "video" : "image";
+  if (state.mode !== wanted) setMode(wanted);
+
+  if (isVideo) loadVideoFile(file);
+  else loadImageFile(file);
 }
 
 /* ---------- mode switching ----------------------------------------------- */
@@ -661,7 +666,9 @@ function setMode(mode) {
     tab.classList.toggle("active", tab.dataset.mode === mode));
 
   const video = mode === "video";
-  el("file").accept = video ? "video/*" : "image/*";
+  // Both types are always accepted so the picker never hides the user's file; the
+  // tab then follows whatever they chose.
+  el("file").accept = "image/*,video/*";
   el("pick").textContent = t(video ? "pick.video" : "pick.image");
   el("dropIcon").textContent = video ? "🎬" : "🖼️";
   el("crfField").hidden = !video;
