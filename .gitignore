@@ -1,0 +1,31 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+
+# Downloaded model weights (fetch with: uv run wmr download-model).
+# Anchored to the repo root: docs/models/migan.onnx IS committed, since GitHub Pages
+# has to serve it to the browser.
+/models/*.onnx
+
+# Generated test corpus and outputs (rebuild: uv run python scripts/make_samples.py)
+samples/*.mp4
+samples/truth.json
+samples/wm_image*.png
+samples/ref_image*.png
+samples/img_*.png
+samples/compare*.png
+samples/migan_probe_*.png
+
+# logo.png is the source the corpus is built from - keep it
+!samples/logo.png
+
+
+# Local editor/dev-server config (machine-specific paths)
+.claude/

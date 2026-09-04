@@ -1,0 +1,112 @@
+<!doctype html>
+<html lang="id">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>WMR — Watermark Remover</title>
+<meta name="description" content="Hapus watermark dari gambar langsung di browser. Tanpa upload, tanpa install — MI-GAN berjalan di perangkat kamu sendiri.">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🧽</text></svg>">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<header>
+  <h1>WMR <span class="tag">web</span></h1>
+  <p class="lede">
+    Hapus watermark dari gambar langsung di browser.
+    <strong>Tidak ada file yang di-upload</strong> — modelnya diunduh ke perangkat kamu
+    dan seluruh prosesnya jalan di sini.
+  </p>
+</header>
+
+<main>
+  <section id="stage" class="panel">
+    <div id="dropzone">
+      <input type="file" id="file" accept="image/*" hidden>
+      <div class="drop-inner">
+        <div class="drop-icon">🖼️</div>
+        <p><button type="button" id="pick" class="primary">Pilih gambar</button></p>
+        <p class="muted">atau seret gambar ke sini · tempel dengan Ctrl+V</p>
+        <p><button type="button" id="demo" class="link">Coba pakai gambar contoh →</button></p>
+      </div>
+    </div>
+
+    <div id="editor" hidden>
+      <div class="canvas-wrap">
+        <canvas id="base"></canvas>
+        <canvas id="overlay"></canvas>
+      </div>
+      <p class="hint">Coret watermark-nya. Yang tertutup merah akan diganti.</p>
+    </div>
+  </section>
+
+  <aside class="panel controls">
+    <label class="field">
+      <span>Ukuran kuas <b id="brushVal">36</b> px</span>
+      <input type="range" id="brush" min="6" max="140" value="36">
+    </label>
+
+    <label class="field">
+      <span>Perbesar mask <b id="growVal">3</b> px</span>
+      <input type="range" id="grow" min="0" max="20" value="3">
+      <small class="muted">Kecil lebih baik — makin besar lubangnya, makin banyak yang harus ditebak model.</small>
+    </label>
+
+    <div class="row">
+      <button type="button" id="undo" disabled>Undo</button>
+      <button type="button" id="clear" disabled>Bersihkan coretan</button>
+    </div>
+
+    <button type="button" id="run" class="primary block" disabled>Hapus watermark</button>
+
+    <div id="status" class="status" hidden>
+      <div class="bar"><i id="barFill"></i></div>
+      <span id="statusText">Memuat model…</span>
+    </div>
+
+    <div class="row">
+      <button type="button" id="download" class="block" disabled>Download hasil</button>
+    </div>
+    <button type="button" id="reset" class="link" hidden>Mulai dengan gambar lain</button>
+
+    <p class="note" id="engineNote">Model MI-GAN (30 MB) diunduh sekali lalu di-cache browser.</p>
+  </aside>
+</main>
+
+<section class="panel prose">
+  <h2>Cara kerjanya</h2>
+  <p>
+    Watermark tidak bisa "dibalik" kecuali logonya sudah diketahui persis. Yang bisa
+    dilakukan adalah <em>inpainting</em>: area yang kamu tandai dibuang, lalu diisi ulang
+    berdasarkan piksel di sekitarnya. Halaman ini memakai <strong>MI-GAN</strong> lewat
+    <code>onnxruntime-web</code>, berjalan penuh di browser kamu.
+  </p>
+  <p>
+    Yang dikirim ke model bukan seluruh gambar, melainkan potongan di sekitar mask —
+    konteks secukupnya, jauh lebih cepat, dan hasilnya lebih tajam. Tepi tambalannya
+    di-<em>feather</em> supaya sambungannya tidak terlihat.
+  </p>
+
+  <h2>Butuh video, atau kualitas tertinggi?</h2>
+  <p>
+    Versi desktop-nya menangani <strong>video</strong> (termasuk watermark yang bergerak,
+    dilacak per frame) dan punya engine <strong>LaMa</strong> yang lebih akurat, plus
+    <code>delogo</code> ffmpeg yang real-time. Kodenya ada di
+    <a href="https://github.com/Skyrooth/WatermarkRemover">github.com/Skyrooth/WatermarkRemover</a>.
+  </p>
+
+  <h2>Catatan</h2>
+  <ul>
+    <li>Yang dihapus hanya watermark <strong>visual</strong>. Watermark tak-kasat-mata seperti SynthID tidak disentuh.</li>
+    <li>Tandai watermark seketat mungkin — hasilnya lebih baik daripada menandai area lebar.</li>
+    <li>Pakai untuk konten milik sendiri atau yang kamu punya izinnya.</li>
+  </ul>
+</section>
+
+<footer>
+  <p>MIT · <a href="https://github.com/Skyrooth/WatermarkRemover">Kode sumber</a></p>
+</footer>
+
+<script src="app.js"></script>
+</body>
+</html>
