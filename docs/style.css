@@ -43,6 +43,36 @@ header, main, .prose, footer, .tabs {
 
 header { margin-bottom: 18px; }
 
+.head-row {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.lang { display: flex; gap: 0; }
+
+.lang-btn {
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  padding: 5px 11px;
+  border: 1px solid var(--line);
+  background: var(--panel);
+  color: var(--muted);
+  border-radius: 0;
+  cursor: pointer;
+}
+
+.lang-btn:first-child { border-radius: 6px 0 0 6px; }
+.lang-btn:last-child { border-radius: 0 6px 6px 0; margin-left: -1px; }
+
+.lang-btn.active {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--accent-ink);
+}
+
 h1 {
   margin: 0 0 6px;
   font-size: 30px;

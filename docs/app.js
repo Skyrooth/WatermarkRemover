@@ -27,6 +27,26 @@ const MIN_MARGIN = 64;
 const HALO_DILATE = 2;
 const FEATHER_PX = 1.6;
 
+/* ---------- language ------------------------------------------------------ */
+
+const LANG_KEY = "wmr-lang";
+
+function currentLang() {
+  try {
+    const saved = localStorage.getItem(LANG_KEY);
+    if (saved === "en" || saved === "id") return saved;
+  } catch {
+    /* private mode: fall through to the browser's own preference */
+  }
+  return navigator.language?.toLowerCase().startsWith("id") ? "id" : "en";
+}
+
+/** Translate a key. English is the source language, so it falls back to itself. */
+function t(key) {
+  const lang = state?.lang ?? "en";
+  return (I18N[lang] && I18N[lang][key]) || EN_FALLBACK[key] || key;
+}
+
 const el = (id) => document.getElementById(id);
 const base = el("base");
 const overlay = el("overlay");
@@ -34,6 +54,7 @@ const baseCtx = base.getContext("2d", { willReadFrequently: true });
 const overlayCtx = overlay.getContext("2d", { willReadFrequently: true });
 
 const state = {
+  lang: "en",
   mode: "image",
   strokes: [],
   current: null,
@@ -210,7 +231,7 @@ function currentMask() {
       any = true;
     }
   }
-  if (!any) throw new Error("Belum ada area yang dicoret.");
+  if (!any) throw new Error(t("err.noStrokes"));
   const grow = Number(el("grow").value);
   return grow > 0 ? dilate(mask, w, h, grow) : mask;
 }
@@ -235,7 +256,7 @@ async function loadRuntime() {
     const script = document.createElement("script");
     script.src = gpu ? ORT_GPU : ORT_CPU;
     script.onload = resolve;
-    script.onerror = () => reject(new Error("onnxruntime-web gagal dimuat."));
+    script.onerror = () => reject(new Error(t("err.ort")));
     document.head.append(script);
   });
 
@@ -252,9 +273,9 @@ async function loadSession() {
   state.loadingSession = (async () => {
     const gpu = await loadRuntime();
 
-    setStatus("Mengunduh model MI-GAN…", 0);
+    setStatus(t("st.downloadModel"), 0);
     const response = await fetch(MODEL_URL);
-    if (!response.ok) throw new Error(`Model gagal diunduh (HTTP ${response.status})`);
+    if (!response.ok) throw new Error(`${t("err.model")} (HTTP ${response.status})`);
 
     const total = Number(response.headers.get("Content-Length")) || 0;
     const chunks = [];
@@ -265,7 +286,7 @@ async function loadSession() {
       if (done) break;
       chunks.push(value);
       received += value.length;
-      setStatus(`Mengunduh model… ${(received / 1e6).toFixed(1)} MB`,
+      setStatus(`${t("st.downloading")} ${(received / 1e6).toFixed(1)} MB`,
         total ? (received / total) * 0.9 : 0.5);
     }
 
@@ -276,7 +297,7 @@ async function loadSession() {
       offset += chunk.length;
     }
 
-    setStatus("Menyiapkan model…", 0.95);
+    setStatus(t("st.prepModel"), 0.95);
     for (const backend of gpu ? ["webgpu", "wasm"] : ["wasm"]) {
       try {
         state.session = await ort.InferenceSession.create(bytes.buffer, {
@@ -289,7 +310,7 @@ async function loadSession() {
         console.warn(`${backend} unavailable:`, error);
       }
     }
-    if (!state.session) throw new Error("Model tidak bisa dijalankan di browser ini.");
+    if (!state.session) throw new Error(t("err.noBackend"));
     return state.session;
   })();
 
@@ -307,7 +328,7 @@ async function inpaintImage() {
   const crop = cropWindow(maskBounds(mask, W, H), W, H);
 
   const session = await loadSession();
-  setStatus("Menghapus watermark…", 0.4);
+  setStatus(t("st.removing"), 0.4);
   await nextFrame();
 
   const small = makeCanvas(MODEL_SIZE, MODEL_SIZE);
@@ -356,7 +377,7 @@ async function inpaintImage() {
   });
   const filled = output[session.outputNames[0]].data;
 
-  setStatus("Menyusun hasil…", 0.85);
+  setStatus(t("st.composing"), 0.85);
   await nextFrame();
 
   const outSmall = makeCanvas(MODEL_SIZE, MODEL_SIZE);
@@ -405,19 +426,19 @@ async function loadFfmpeg() {
   if (state.loadingFfmpeg) return state.loadingFfmpeg;
 
   state.loadingFfmpeg = (async () => {
-    setStatus("Memuat ffmpeg…", 0.02);
+    setStatus(t("st.loadFfmpeg"), 0.02);
     await new Promise((resolve, reject) => {
       const script = document.createElement("script");
       script.src = `${FFMPEG_DIR}ffmpeg.js`;
       script.onload = resolve;
-      script.onerror = () => reject(new Error("ffmpeg.js gagal dimuat."));
+      script.onerror = () => reject(new Error(t("err.ffmpegScript")));
       document.head.append(script);
     });
 
     const ffmpeg = new FFmpegWASM.FFmpeg();
     ffmpeg.on("log", ({ message }) => console.debug("[ffmpeg]", message));
 
-    setStatus("Menyiapkan ffmpeg (32 MB)…", 0.1);
+    setStatus(t("st.prepFfmpeg"), 0.1);
     // Absolute URLs: the worker resolves these against its own location, not the page,
     // so a relative path here becomes "Cannot find module".
     const absolute = (name) => new URL(FFMPEG_DIR + name, location.href).href;
@@ -429,8 +450,7 @@ async function loadFfmpeg() {
         wasmURL: absolute("ffmpeg-core.wasm"),
       }),
       new Promise((_, reject) =>
-        setTimeout(() => reject(new Error("ffmpeg tidak selesai dimuat. Coba muat ulang halaman.")),
-          FFMPEG_LOAD_TIMEOUT_MS)),
+        setTimeout(() => reject(new Error(t("err.ffmpegLoad"))), FFMPEG_LOAD_TIMEOUT_MS)),
     ]);
     state.ffmpeg = ffmpeg;
     return ffmpeg;
@@ -459,15 +479,15 @@ function delogoFilter(boxes, width, height) {
 async function processVideo() {
   const mask = currentMask();
   const boxes = maskBoxes(mask, base.width, base.height);
-  if (!boxes.length) throw new Error("Coretannya terlalu kecil untuk dikenali.");
+  if (!boxes.length) throw new Error(t("err.tooSmall"));
 
   const ffmpeg = await loadFfmpeg();
 
-  setStatus("Menyiapkan video…", 0.3);
+  setStatus(t("st.prepVideo"), 0.3);
   await ffmpeg.writeFile("in.mp4", new Uint8Array(await state.videoFile.arrayBuffer()));
 
   const onProgress = ({ progress }) =>
-    setStatus(`Memproses video… ${Math.round(progress * 100)}%`, 0.35 + progress * 0.6);
+    setStatus(`${t("st.processing")} ${Math.round(progress * 100)}%`, 0.35 + progress * 0.6);
   ffmpeg.on("progress", onProgress);
 
   try {
@@ -482,12 +502,12 @@ async function processVideo() {
       "-movflags", "+faststart",
       "out.mp4",
     ]);
-    if (code !== 0) throw new Error(`ffmpeg gagal (kode ${code}). Coba format video lain.`);
+    if (code !== 0) throw new Error(`${t("err.ffmpegRun")} (${code})`);
   } finally {
     ffmpeg.off("progress", onProgress);
   }
 
-  setStatus("Menyusun hasil…", 0.97);
+  setStatus(t("st.composing"), 0.97);
   const data = await ffmpeg.readFile("out.mp4");
   await ffmpeg.deleteFile("in.mp4").catch(() => {});
   await ffmpeg.deleteFile("out.mp4").catch(() => {});
@@ -585,7 +605,7 @@ function loadImageFile(file) {
       baseCtx.drawImage(img, 0, 0);
       startEditing();
     };
-    img.onerror = () => showError("Gambar tidak bisa dibaca.");
+    img.onerror = () => showError(t("err.badImage"));
     img.src = reader.result;
   };
   reader.readAsDataURL(file);
@@ -611,12 +631,12 @@ function loadVideoFile(file) {
     URL.revokeObjectURL(url);
     startEditing();
     el("hint").textContent =
-      `Coret watermark-nya. Mask ini dipakai untuk seluruh video — ` +
-      `${video.videoWidth}×${video.videoHeight}, ${(video.duration || 0).toFixed(1)} detik.`;
+      `${t("st.maskAllFrames")} — ${video.videoWidth}×${video.videoHeight}, ` +
+      `${(video.duration || 0).toFixed(1)} ${t("st.videoInfo")}.`;
   };
   video.onerror = () => {
     URL.revokeObjectURL(url);
-    showError("Video tidak bisa dibaca. Coba MP4 (H.264).");
+    showError(t("err.badVideo"));
   };
   video.src = url;
 }
@@ -625,10 +645,10 @@ function loadFile(file) {
   if (!file) return;
   hideError();
   if (state.mode === "video") {
-    if (!file.type.startsWith("video/")) return showError("Pilih file video.");
+    if (!file.type.startsWith("video/")) return showError(t("err.pickVideo"));
     loadVideoFile(file);
   } else {
-    if (!file.type.startsWith("image/")) return showError("Pilih file gambar.");
+    if (!file.type.startsWith("image/")) return showError(t("err.pickImage"));
     loadImageFile(file);
   }
 }
@@ -642,12 +662,10 @@ function setMode(mode) {
 
   const video = mode === "video";
   el("file").accept = video ? "video/*" : "image/*";
-  el("pick").textContent = video ? "Pilih video" : "Pilih gambar";
+  el("pick").textContent = t(video ? "pick.video" : "pick.image");
   el("dropIcon").textContent = video ? "🎬" : "🖼️";
   el("crfField").hidden = !video;
-  el("hint").textContent = video
-    ? "Coret watermark-nya. Mask ini dipakai untuk seluruh video."
-    : "Coret watermark-nya. Yang tertutup merah akan diganti.";
+  el("hint").textContent = t(video ? "hint.video" : "hint.image");
 
   state.strokes = [];
   state.videoFile = null;
@@ -677,7 +695,7 @@ el("demo").addEventListener("click", async () => {
     const blob = await response.blob();
     loadFile(new File([blob], name, { type: blob.type }));
   } catch {
-    showError("Contoh gagal dimuat.");
+    showError(t("err.demo"));
   }
 });
 
@@ -727,10 +745,10 @@ el("run").addEventListener("click", async () => {
     state.strokes = [];
     redrawOverlay();
     el("download").disabled = false;
-    setStatus(`Selesai dalam ${((performance.now() - started) / 1000).toFixed(1)} detik.`, 1);
+    setStatus(`${t("st.done")} ${((performance.now() - started) / 1000).toFixed(1)} ${t("st.seconds")}`, 1);
   } catch (error) {
     console.error(error);
-    showError(error.message || "Gagal memproses file.");
+    showError(error.message || t("err.generic"));
     clearStatus();
   } finally {
     el("run").disabled = state.strokes.length === 0;
@@ -747,4 +765,37 @@ el("download").addEventListener("click", () => {
   setTimeout(() => URL.revokeObjectURL(url), 10000);
 });
 
-setMode("image");
+/* ---------- language switching ------------------------------------------- */
+
+function applyLanguage(lang) {
+  state.lang = lang;
+  document.documentElement.lang = lang;
+
+  document.querySelectorAll("[data-i18n]").forEach((node) => {
+    const key = node.dataset.i18n;
+    if (!node.dataset.en) node.dataset.en = node.innerHTML; // English is the source
+    const translated = I18N[lang] && I18N[lang][key];
+    node.innerHTML = translated ?? node.dataset.en;
+  });
+
+  document.querySelectorAll(".lang-btn").forEach((button) =>
+    button.classList.toggle("active", button.dataset.lang === lang));
+
+  // Strings the script sets itself need re-applying in the new language.
+  el("pick").textContent = t(state.mode === "video" ? "pick.video" : "pick.image");
+  if (el("editor").hidden) {
+    el("hint").textContent = t(state.mode === "video" ? "hint.video" : "hint.image");
+  }
+
+  try {
+    localStorage.setItem(LANG_KEY, lang);
+  } catch {
+    /* private mode: the choice just will not persist */
+  }
+}
+
+document.querySelectorAll(".lang-btn").forEach((button) =>
+  button.addEventListener("click", () => applyLanguage(button.dataset.lang)));
+
+applyLanguage(currentLang());
+setMode(state.mode);

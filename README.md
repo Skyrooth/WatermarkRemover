@@ -1,32 +1,31 @@
-# WMR — Watermark Remover (gambar + video)
+# WMR — Watermark Remover (images + video)
 
-Tool lokal untuk menghapus watermark / logo dari **gambar** dan **video**.
-Kamu tandai area watermark-nya (brush atau koordinat box), tool-nya meng-*inpaint*
-area itu. Semua proses jalan di PC ini — tidak ada file yang di-upload ke mana pun.
+> 🇮🇩 [Versi Bahasa Indonesia](README_id.md)
 
-> **Versi web (gambar saja): [skyrooth.github.io/WatermarkRemover](https://skyrooth.github.io/WatermarkRemover/)**
-> Tanpa install apa pun. MI-GAN berjalan di browser kamu lewat `onnxruntime-web`,
-> ~1,6 detik per gambar. Untuk **video** dan engine LaMa, pakai versi desktop di bawah.
+Remove watermarks and logos from **images** and **video**. You mark the watermark
+(brush, or box coordinates) and the tool *inpaints* that area. Everything runs on your
+own machine — nothing is uploaded anywhere.
 
-## Kenapa bukan fork dari gemini-watermark-remover
+> **Browser version: [skyrooth.github.io/WatermarkRemover](https://skyrooth.github.io/WatermarkRemover/)**
+> Nothing to install. Images go through MI-GAN via `onnxruntime-web`; video runs
+> ffmpeg's `delogo` filter as WebAssembly. Both work entirely on your device.
 
-Repo `GargantuaX/gemini-watermark-remover` pakai *reverse alpha blending* dengan
-**alpha map logo Gemini yang sudah di-embed**. Rumusnya membalik
-`hasil = asli×(1−α) + logo×α`, dan itu presisi **hanya karena α + warna logo sudah
-diketahui persis**. Untuk logo sembarang (TikTok, CapCut, Sora, stock photo, dll)
-α-nya tidak diketahui, jadi seluruh core Gemini-specific-nya tidak bisa dipakai.
-Pendekatan yang benar untuk watermark umum adalah **mask + inpainting** — itu yang
-dipakai di sini.
+## Why this is not a fork of gemini-watermark-remover
+
+[`GargantuaX/gemini-watermark-remover`](https://github.com/GargantuaX/gemini-watermark-remover)
+uses *reverse alpha blending* against **embedded per-pixel alpha maps of the Gemini
+logo**. It inverts `output = original×(1−α) + logo×α`, which is exact **only because α
+and the logo colour are known in advance**. For an arbitrary logo — TikTok, CapCut,
+a stock-photo mark — α is unknown, so none of that engine generalises. The right
+approach for arbitrary watermarks is **mask + inpainting**, which is what this does.
 
 ## Install
-
-Sudah siap pakai (`uv sync` sudah dijalankan). Kalau pindah PC:
 
 ```bash
 uv sync
 ```
 
-Butuh **ffmpeg + ffprobe** di PATH (sudah ada: ffmpeg 8.1.2 full build).
+Needs **ffmpeg + ffprobe** on PATH.
 
 ## GUI
 
@@ -34,92 +33,108 @@ Butuh **ffmpeg + ffprobe** di PATH (sudah ada: ffmpeg 8.1.2 full build).
 uv run python app.py
 ```
 
-Buka http://localhost:7861
+Then open http://localhost:7861
 
-- **Tab Gambar** — upload gambar → coret watermark pakai brush → pilih engine → *Hapus watermark*
-- **Tab Video** — upload video → frame preview muncul otomatis → coret watermark di frame itu
-  (mask berlaku untuk seluruh video) → *Hapus watermark*. Audio asli ikut, tidak di-encode ulang.
+- **Image tab** — load an image, paint over the watermark, pick an engine, remove.
+- **Video tab** — load a video, a preview frame appears, paint the watermark on it.
+  Tick **"Watermark bergerak"** if the watermark moves. The original audio is copied
+  across, never re-encoded.
 
 ## CLI
 
 ```bash
-# gambar
-uv run wmr image foto.png --box 940,590,300,90 -o bersih.png   # engine lama (default)
+# image (defaults to the lama engine)
+uv run wmr image photo.png --box 940,590,300,90 -o clean.png
 
-# koordinat boleh persen
-uv run wmr image foto.png --box "72%,82%,24%,13%" --engine ns
+# coordinates may be percentages
+uv run wmr image photo.png --box "72%,82%,24%,13%" --engine ns
 
-# pakai file mask (putih = dihapus)
-uv run wmr image foto.png --mask mask.png --engine lama
+# a mask image instead of a box; white = remove
+uv run wmr image photo.png --mask mask.png
 
-# video (default: migan di GPU)
-uv run wmr video klip.mp4 --box 940,590,300,90 -o bersih.mp4
+# video (defaults to migan on the GPU)
+uv run wmr video clip.mp4 --box 940,590,300,90 -o clean.mp4
 
-# video (paling cepat, ffmpeg delogo)
-uv run wmr video klip.mp4 --box 940,590,300,90 --engine delogo
+# fastest path: ffmpeg delogo
+uv run wmr video clip.mp4 --box 940,590,300,90 --engine delogo
 
-# watermark BERGERAK - dilacak otomatis di tiap frame
-uv run wmr video klip.mp4 --box 940,590,300,90 --track
+# a MOVING watermark, tracked per frame
+uv run wmr video clip.mp4 --box 940,590,300,90 --track
 
-# kalau kotaknya kamu ambil dari detik 3, bukan awal video
-uv run wmr video klip.mp4 --box 940,590,300,90 --track --at 3
+# when the box was taken at 3s rather than the start
+uv run wmr video clip.mp4 --box 940,590,300,90 --track --at 3
 
-# info file
-uv run wmr probe klip.mp4
+# media info
+uv run wmr probe clip.mp4
 ```
 
-Flag penting:
-
-| Flag | Arti |
+| Flag | Meaning |
 |---|---|
-| `--box X,Y,W,H` | Area watermark. Boleh diulang untuk beberapa watermark. Boleh persen. |
-| `--mask file.png` | Alternatif box: mask gambar, putih = dihapus. |
-| `--engine` | gambar: `lama` (default) · video: `migan` (default) · `delogo` (video saja) · `telea` · `ns` |
-| `--grow N` | Melebarkan mask N px sebelum inpaint (default 3). Naikkan kalau masih ada sisa tepi. |
-| `--crf N` | Kualitas encode video, kecil = lebih bagus (default 18). |
-| `--track` | Lacak watermark yang bergerak (video). |
-| `--at S` | Detik di mana `--box`/`--mask` diambil (default 0). |
-| `--json` | Output hasil sebagai JSON. |
+| `--box X,Y,W,H` | Watermark region. Repeatable for several watermarks. Percentages allowed. |
+| `--mask file.png` | Mask image instead of a box; white means remove. |
+| `--engine` | images: `lama` (default) · video: `migan` (default) · `delogo` (video only) · `telea` · `ns` |
+| `--grow N` | Dilate the mask by N px before inpainting (default 3). |
+| `--crf N` | Video encode quality, lower is better (default 18). |
+| `--track` | Follow a moving watermark (video). |
+| `--at S` | Timestamp the `--box`/`--mask` describes (default 0). |
+| `--json` | Print the result as JSON. |
 
-## Engine
+## Engines
 
-Diukur di PC ini (720p, GTX 1660 SUPER, `scripts/bench_engines.py`):
+Measured on a GTX 1660 SUPER at 720p (`scripts/bench_engines.py`):
 
-| Engine | Perangkat | Kecepatan | Cocok untuk |
+| Engine | Device | Speed | Best for |
 |---|---|---|---|
-| `lama` | CPU saja | 2,57 detik/frame | **Default untuk gambar.** Kualitas tertinggi, konsisten. |
-| `migan` | **GPU (DirectML)** | **0,091 detik/frame** | **Default untuk video.** AI inpainting yang sanggup real-time-ish. |
-| `delogo` | CPU (ffmpeg) | real-time | Logo kecil semi-transparan, posisi tetap. Tidak bisa `--track`. |
-| `telea` / `ns` | CPU | 0,055 detik/frame | Cepat, dan kuat justru di background halus. |
+| `lama` | CPU only | 2.57 s/frame | **Image default.** Highest quality, consistently. |
+| `migan` | **GPU (DirectML)** | **0.091 s/frame** | **Video default.** AI inpainting fast enough for clips. |
+| `delogo` | CPU (ffmpeg) | real time | Small semi-transparent logos in a fixed position. No `--track`. |
+| `telea` / `ns` | CPU | 0.055 s/frame | Fast, and surprisingly strong on smooth backgrounds. |
 
-Video 6 detik (180 frame, 720p): `migan` **26 detik**, `lama` **7,6 menit**.
+A 6-second 720p clip: `migan` **26 s**, `lama` **7.6 min**.
 
-### Sisa watermark yang terukur
+### Measured residue
 
-`scripts/eval_removal.py` membandingkan hasil dengan klip referensi bersih dan
-melaporkan sisa error di area watermark (makin kecil makin baik):
+`scripts/eval_removal.py` compares the output against a clean reference clip and
+reports the leftover error inside the watermark region, as a share of the original:
 
-| Engine | Background halus | Background bertekstur | Waktu (180 frame) |
-|---|---|---|---|
-| `lama` | **21,4%** | **24,9%** | 457 detik |
-| `telea` | 40,1% | 34,8% | 19 detik |
-| `ns` | 39,8% | 35,0% | 18 detik |
-| `migan` | 48,0% | 42,9% | 26 detik |
+| Engine | Smooth background | Textured background |
+|---|---|---|
+| `lama` | **21.4%** | **24.9%** |
+| `telea` | 40.1% | 34.8% |
+| `ns` | 39.8% | 35.0% |
+| `migan` | 48.0% | 42.9% |
 
-**Baca ini dengan hati-hati.** `lama` menang di mana-mana — itu solid. Tapi
-`telea`/`ns` mengalahkan `migan` di sini **karena kedua background uji ini sintetis
-dan mulus secara lokal**, dan itu justru medan terbaik untuk difusi. Di konten nyata
-yang punya struktur (garis, tekstur, objek), difusi menghasilkan smear sedangkan
-inpainting AI merekonstruksi — terlihat jelas di `samples/compare_engines.png` pada
-pola checkerboard. Jadi angka di atas **tidak** menyelesaikan perdebatan
-`migan` vs `telea` untuk footage asli; coba keduanya di klip kamu sendiri.
+**Read this carefully.** `lama` winning everywhere is solid. But `telea`/`ns` beating
+`migan` here is an artefact of the test corpus: both synthetic backgrounds are locally
+smooth, which is the ideal terrain for diffusion inpainting. On real footage with
+structure, diffusion smears and AI reconstructs — visible in the Veo test below, where
+`delogo` leaves horizontal streaks on a detailed frame and `migan` does not. These
+numbers settle "lama is the most accurate" and "a small `--grow` beats a large one";
+they do not settle `migan` vs `telea` for real video.
 
-Yang bisa disimpulkan dari angka ini: `lama` paling akurat, dan `--grow` kecil lebih
-baik daripada besar.
+## Gemini / Veo watermarks
 
-### Model
+The Veo mark is a small four-point sparkle in the bottom-right corner. On a 1280×720
+clip it measures **48×48 px, inset 96 px from both the right and bottom edges**.
 
-Keduanya sudah terunduh ke `models/`. Kalau setup ulang:
+`scripts/find_watermark.py` locates a constant watermark from the video itself — a mark
+present in every frame leaves a brightness floor the moving content cannot go below:
+
+```bash
+uv run python scripts/find_watermark.py clip.mp4
+```
+
+Then remove it. `delogo` is instant and fine over smooth backgrounds; `migan` is
+noticeably cleaner when there is texture behind the mark:
+
+```bash
+uv run wmr video clip.mp4 --box 1136,576,48,48 --engine migan
+```
+
+Measured on a real 10-second Veo clip: `delogo` 2.4 s, `migan` 29 s, both preserving
+audio, duration and resolution.
+
+## Models
 
 ```bash
 uv add onnxruntime-directml
@@ -127,114 +142,124 @@ uv run wmr download-model --model migan   # 30 MB
 uv run wmr download-model --model lama    # 208 MB
 ```
 
-**Kenapa `migan` jalan di GPU tapi `lama` tidak.** LaMa memakai *fast Fourier
-convolution*, dan DirectML tidak punya kernel untuk op FFT-nya — graph-nya ke-load
-lalu mati saat runtime. MI-GAN tidak pakai FFT jadi mulus di DirectML. Setiap engine
-ONNX **menguji provider-nya dengan satu forward pass** saat dibuat dan otomatis turun
-ke CPU kalau gagal (lihat `OnnxInpaintEngine.fallback_from`) — jadi tidak ada crash
-di tengah proses video. Untuk LaMa di GPU perlu jalur CUDA (`onnxruntime-gpu` +
-CUDA 12 + cuDNN 9), belum terpasang di PC ini.
+**Why `migan` runs on the GPU and `lama` does not.** LaMa uses fast Fourier
+convolutions, and DirectML has no kernel for its FFT ops — the graph loads and then
+dies at run time. MI-GAN has no FFT and runs fine. Every ONNX engine **proves its
+provider with one forward pass** at construction and quietly falls back to the CPU if
+that fails (see `OnnxInpaintEngine.fallback_from`), so a long video never dies halfway
+through. Running LaMa on a GPU needs the CUDA path: `onnxruntime-gpu` + CUDA 12 +
+cuDNN 9.
 
-Perbedaan lain yang ditangani otomatis: polaritas mask **terbalik** (LaMa 255 = lubang,
-MI-GAN 255 = dipertahankan), dan LaMa input-nya fixed 512×512 sedangkan MI-GAN dinamis.
+Two more differences handled automatically: the mask polarity is **inverted** between
+them (LaMa 255 = hole, MI-GAN 255 = keep), and the LaMa export is fixed at 512×512
+while MI-GAN is dynamic.
 
-Benchmark ulang kapan saja:
+## Moving watermarks (`--track`)
 
-```bash
-uv run python scripts/bench_engines.py
-```
+When the logo slides around or hops between corners, one static mask is not enough.
+`--track` runs two passes:
 
-## Struktur
+1. **Track** — template matching on *gradient magnitude* rather than raw colour: the
+   logo's edges stay put even as the background under a semi-transparent overlay
+   changes. Each frame searches near the previous hit first (cheap); when the score
+   drops it sweeps the whole frame, which is what catches a corner hop.
+2. **Remove** — the mask is placed at the tracked position on every frame.
 
-```
-wmr/
-  ffmpeg.py     probe, pipe frame raw, mux audio
-  mask.py       box (absolut/persen), file mask, dilate, bbox, connected components
-  engines.py    OpenCV (telea/ns) + OnnxInpaintEngine → MI-GAN & LaMa
-  tracking.py   pelacak template untuk watermark bergerak
-  image_ops.py  baca/tulis gambar (alpha dipertahankan) + pipeline gambar
-  video_ops.py  backend delogo, per-frame, dan tracked
-  download.py   unduh model MI-GAN / LaMa
-  cli.py        CLI wmr
-app.py          GUI Gradio
-scripts/        make_samples, eval_tracking, eval_removal, bench_engines, probe_migan
-tests/          29 test pytest
-models/         migan.onnx + lama_fp32.onnx (tidak masuk git)
-samples/        corpus uji + ground truth (tidak masuk git)
-```
+Frames that never matched confidently are **interpolated** between the frames that did,
+rather than guessed.
 
-### Detail implementasi yang penting
-
-`OnnxInpaintEngine` tidak mengirim seluruh frame ke model. Alurnya: ambil **crop di
-sekitar mask** (konteks secukupnya, bukan 4K penuh) → lebarkan ke aspect ratio model →
-resize ke resolusi model → inpaint → resize balik → **blend dengan tepi di-feather**
-supaya sambungannya tidak kelihatan.
-
-Satu jebakan yang sudah diperbaiki: saat crop di-resize, watermark-nya "meleber" 1–2
-piksel melewati tepinya sendiri. Kalau mask di-resize dengan NEAREST, halo itu berada
-di **luar** lubang, model membacanya sebagai konteks sah dan menariknya kembali ke
-hasil isian. Efeknya besar — error uji 45,9 vs 1,3. Karena itu mask di-resize dengan
-INTER_LINEAR (coverage sebagian dihitung sebagai lubang) lalu di-dilate 2 px.
-
-## Test
-
-```bash
-uv run --with pytest pytest -q
-```
-
-## Watermark bergerak (`--track`)
-
-Kalau logonya pindah posisi atau loncat antar sudut, satu mask statis tidak cukup.
-Dengan `--track` (atau centang **"Watermark bergerak"** di GUI) tool ini jalan dua pass:
-
-1. **Lacak** — template matching pada *gradient magnitude*, bukan warna mentah.
-   Tepi logo tetap sama walau background di balik overlay semi-transparan berubah.
-   Tiap frame dicari dulu di sekitar posisi sebelumnya (murah); kalau skornya jatuh,
-   barulah sapu satu frame penuh — itu yang menangkap lompatan antar sudut.
-2. **Hapus** — mask dipindah ke posisi hasil pelacakan di setiap frame.
-
-Frame yang skor kecocokannya rendah tidak ditebak asal: posisinya **diinterpolasi**
-dari frame yang yakin di kiri-kanannya.
-
-**Akurasi terukur.** `samples/truth.json` menyimpan posisi logo yang sebenarnya di
-tiap frame (karena sample-nya dibuat sendiri oleh `scripts/make_samples.py`), jadi
-errornya angka nyata, bukan kesan:
+**Measured accuracy.** `samples/truth.json` records the true box of every frame, since
+the corpus is generated rather than found:
 
 ```
 uv run python scripts/eval_tracking.py
-→ mean 0.00px   median 0.00px   p95 0.00px   max 0.00px   (180 frame, 2 klip)
+→ mean 0.00px   median 0.00px   p95 0.00px   max 0.00px   (180 frames, 2 clips)
 ```
 
-Satu jebakan yang sudah diperbaiki: median filter untuk meredam jitter **memangkas
-titik balik**. Saat logo memantul, median dari `[8, 1, 8]` adalah `8` — puncak
-pantulannya hilang dan mask jadi tertinggal di frame itu. Sekarang median hanya
-dipakai untuk *menolak outlier* (kalau simpangannya melebihi skala gerak klip itu
-sendiri), bukan mengganti semua posisi. Itu yang membawa error dari 0,12 px ke 0,00 px.
+One trap already fixed: a median filter meant to damp jitter also **flattens direction
+changes**. For a bouncing logo `median([8, 1, 8])` is `8`, so the bounce vertex
+disappears and the mask lags. The median now only *rejects outliers* — deviations
+beyond the clip's own motion scale — instead of replacing every position. That is what
+took the error from 0.12 px to 0.00 px.
 
-`--engine delogo` tidak bisa dipakai bersama `--track` — filter ffmpeg itu hanya
-menggambar satu kotak tetap untuk seluruh klip. Tool-nya menolak dengan pesan jelas.
+`--engine delogo` cannot be combined with `--track`: that ffmpeg filter draws one fixed
+box for the whole clip. The tool refuses with a clear message.
 
-## Test dan evaluasi
+## Browser version (`docs/`)
+
+Images use MI-GAN through `onnxruntime-web`; video runs ffmpeg's `delogo` as
+WebAssembly with the audio stream-copied. Both runtimes are **served from the site
+itself**, not a CDN — which also makes "nothing leaves your device" literally true.
+
+Notes for anyone reusing this:
+
+- The `@ffmpeg/ffmpeg` ESM worker is a module with relative imports. Handed over as a
+  cross-origin blob URL it fails to spawn, and `ffmpeg.load()` then **hangs with no
+  error at all**. Same origin avoids it.
+- `coreURL` and `wasmURL` must be **absolute**: the worker resolves them against its
+  own location, not the page.
+- Load plain `ort.min.js`, not `ort.webgpu.min.js`, unless
+  `navigator.gpu.requestAdapter()` actually returns an adapter — the WebGPU bundle's
+  wasm binary is ~4× slower on the CPU path. `navigator.gpu` merely existing is not
+  enough.
+- Threaded wasm needs COOP/COEP headers that GitHub Pages cannot send, so both
+  runtimes are single-threaded.
+
+## Layout
+
+```
+wmr/
+  ffmpeg.py     probing, raw frame pipes, audio-preserving mux
+  mask.py       boxes (absolute/percent), mask images, dilation, components
+  engines.py    OpenCV (telea/ns) + OnnxInpaintEngine → MI-GAN & LaMa
+  tracking.py   template tracker for moving watermarks
+  image_ops.py  image read/write (alpha preserved) + image pipeline
+  video_ops.py  delogo, per-frame and tracked backends
+  download.py   model downloads
+  cli.py        the wmr command
+app.py          Gradio GUI
+docs/           the browser version (GitHub Pages)
+scripts/        make_samples, find_watermark, eval_tracking, eval_removal, bench_engines
+tests/          29 pytest tests
+```
+
+### Implementation detail worth knowing
+
+`OnnxInpaintEngine` does not send whole frames to the model. It takes a **crop around
+the mask** (enough context, not a whole 4K frame), widens it to the model's aspect
+ratio, resizes, inpaints, resizes back, and **feathers the seam**.
+
+One trap already fixed: resizing the crop smears the watermark 1–2 px past its own
+edge. With a NEAREST-resized mask that halo sits **outside** the hole, the model reads
+it as valid context and pulls it back into the fill. The effect is large — test error
+45.9 vs 1.3. The mask is therefore resized with INTER_LINEAR (any partial coverage
+counts as hole) and then dilated 2 px.
+
+## Tests and evaluation
 
 ```bash
-uv run --with pytest pytest -q                    # 29 test
-uv run python scripts/make_samples.py             # regenerasi corpus uji
-uv run python scripts/eval_tracking.py            # akurasi pelacakan (px)
-uv run python scripts/eval_removal.py             # sisa watermark vs referensi bersih
-uv run python scripts/bench_engines.py            # kecepatan tiap engine
+uv run --with pytest pytest -q                    # 29 tests
+uv run python scripts/make_samples.py             # rebuild the test corpus
+uv run python scripts/eval_tracking.py            # tracking accuracy, in pixels
+uv run python scripts/eval_removal.py             # residue vs a clean reference
+uv run python scripts/bench_engines.py            # per-engine speed
 ```
 
-Corpus ujinya dibuat di numpy, bukan pakai sumber sintetis ffmpeg — `gradients` acak
-tiap run, dan `testsrc2` adalah kasus terburuk untuk inpainting. Yang lebih penting:
-tiap klip ber-watermark punya **kembaran bersih yang identik piksel per piksel**, jadi
-"sisa watermark" bisa diukur sebagai angka. Ada dua background — sinus halus dan
-noise fraktal — karena background halus memihak difusi dan FFT-nya LaMa, dan bias
-seperti itu bisa membuat kita memilih default yang salah.
+The corpus is generated in numpy rather than with ffmpeg's synthetic sources:
+`gradients` is random per run and `testsrc2` is worst-case for inpainting. More
+importantly, every watermarked clip has a **pixel-identical clean twin**, so "leftover
+watermark" is a number rather than an impression. Two backgrounds exist on purpose —
+a smooth one flatters diffusion and LaMa's Fourier convolutions, and benchmarking only
+on that would pick the wrong default.
 
-## Catatan
+## Notes
 
-- Yang dihapus hanya watermark **visual**. Watermark tak-kasat-mata (mis. SynthID
-  milik Google) tidak disentuh.
-- Tandai watermark **seketat mungkin**. Makin besar lubangnya makin banyak yang harus
-  ditebak model — menaikkan `--grow` dari 2 ke 8 justru memperburuk hasil di semua engine.
-- Pakai untuk konten milik sendiri atau yang kamu punya izinnya.
+- Only the **visible** watermark is removed. Invisible ones such as Google's SynthID
+  are untouched.
+- Mark watermarks **tightly**. Raising `--grow` from 2 to 8 makes results worse across
+  every engine — a bigger hole means more for the model to invent.
+- Use this on content you own or have permission to edit.
+
+## License
+
+MIT — see [LICENSE](LICENSE). Third-party models keep their own licenses.
