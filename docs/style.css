@@ -277,6 +277,13 @@ button.link:hover { text-decoration: underline; }
 
 .note { font-size: 12px; color: var(--muted); margin: 0; }
 
+.why {
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--warn);
+  margin: -6px 0 0;
+}
+
 .error {
   border: 1px solid #c0392b;
   background: color-mix(in srgb, #c0392b 12%, transparent);

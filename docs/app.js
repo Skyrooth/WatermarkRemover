@@ -522,15 +522,176 @@ async function processVideo() {
   player.hidden = false;
 }
 
+/* ---------- finding the watermark automatically --------------------------- */
+
+const DETECT_SAMPLES = 24;
+const DETECT_WIDTH = 480;
+const DETECT_RATE = 16; // scrub by fast playback; seeking 24 times is far slower
+const BORDER_BAND = 0.3; // watermarks live near an edge, not in the middle of a shot
+
+/** Grab frames by playing the clip fast, falling back to seeking. */
+async function sampleFrames(video, ctx, w, h, onProgress) {
+  const frames = [];
+  const grab = () => {
+    ctx.drawImage(video, 0, 0, w, h);
+    frames.push(ctx.getImageData(0, 0, w, h).data);
+    onProgress(frames.length / DETECT_SAMPLES);
+  };
+
+  if (typeof video.requestVideoFrameCallback === "function") {
+    video.playbackRate = DETECT_RATE;
+    video.muted = true;
+    const done = new Promise((resolve) => {
+      const step = () => {
+        if (frames.length >= DETECT_SAMPLES || video.ended) return resolve();
+        grab();
+        video.requestVideoFrameCallback(step);
+      };
+      video.requestVideoFrameCallback(step);
+      video.onended = resolve;
+    });
+    await video.play().catch(() => {});
+    await done;
+    video.pause();
+    if (frames.length >= 4) return frames;
+  }
+
+  // Fallback: evenly spaced seeks.
+  const duration = video.duration || 1;
+  for (let i = frames.length; i < DETECT_SAMPLES; i++) {
+    video.currentTime = Math.min(duration * ((i + 0.5) / DETECT_SAMPLES), duration - 0.05);
+    await new Promise((resolve) => { video.onseeked = resolve; });
+    grab();
+  }
+  return frames;
+}
+
+/** Locate a watermark that is present in every frame.
+ *
+ * Such a mark leaves a brightness floor the moving content cannot go below, so the
+ * per-pixel minimum over time keeps the overlay while the footage darkens away. The
+ * search is restricted to the outer band: a persistently bright highlight in the
+ * middle of a shot otherwise wins on a real clip.
+ */
+async function detectWatermark() {
+  const url = URL.createObjectURL(state.videoFile);
+  const video = document.createElement("video");
+  video.muted = true;
+  video.playsInline = true;
+  video.preload = "auto";
+  video.src = url;
+
+  try {
+    await new Promise((resolve, reject) => {
+      video.onloadeddata = resolve;
+      video.onerror = () => reject(new Error(t("err.badVideo")));
+    });
+
+    const scale = Math.min(1, DETECT_WIDTH / video.videoWidth);
+    const w = Math.max(1, Math.round(video.videoWidth * scale));
+    const h = Math.max(1, Math.round(video.videoHeight * scale));
+    const canvas = makeCanvas(w, h);
+    const ctx = canvas.getContext("2d", { willReadFrequently: true });
+
+    const frames = await sampleFrames(video, ctx, w, h, (done) =>
+      setStatus(t("st.detecting"), 0.1 + 0.7 * done));
+    if (frames.length < 3) return null;
+
+    // Per-pixel floor and ceiling over time.
+    const minimum = new Uint8Array(w * h).fill(255);
+    const maximum = new Uint8Array(w * h);
+    for (const pixels of frames) {
+      for (let j = 0, p = 0; j < minimum.length; j++, p += 4) {
+        const gray = (pixels[p] * 299 + pixels[p + 1] * 587 + pixels[p + 2] * 114) / 1000;
+        if (gray < minimum[j]) minimum[j] = gray;
+        if (gray > maximum[j]) maximum[j] = gray;
+      }
+    }
+    setStatus(t("st.detecting"), 0.85);
+    await nextFrame();
+
+    const bandX = Math.round(w * BORDER_BAND);
+    const bandY = Math.round(h * BORDER_BAND);
+    const inBand = (x, y) => x < bandX || x >= w - bandX || y < bandY || y >= h - bandY;
+
+    const band = [];
+    for (let y = 0; y < h; y++) {
+      for (let x = 0; x < w; x++) if (inBand(x, y)) band.push(minimum[y * w + x]);
+    }
+    band.sort((a, b) => a - b);
+    const threshold = Math.max(band[Math.floor(band.length * 0.985)], 24);
+
+    const hot = new Uint8Array(w * h);
+    for (let y = 0; y < h; y++) {
+      for (let x = 0; x < w; x++) {
+        const i = y * w + x;
+        hot[i] = inBand(x, y) && minimum[i] >= threshold ? 1 : 0;
+      }
+    }
+
+    const frameArea = w * h;
+    let best = null;
+    for (const box of maskBoxes(hot, w, h, 8)) {
+      const area = box.w * box.h;
+      if (area < frameArea * 0.0004 || area > frameArea * 0.06) continue;
+
+      // Compare the candidate with the ring around it. A semi-transparent overlay
+      // does two things at once: it lifts the floor, and it compresses the range,
+      // because everything under it is scaled by (1 - alpha). A merely bright patch
+      // of content lifts the floor without compressing anything, which is what made
+      // an earlier brightness-only score pick the wrong spot on real footage.
+      const margin = Math.max(6, Math.round(Math.max(box.w, box.h) * 0.6));
+      let inMin = 0, inRange = 0, inN = 0;
+      let outMin = 0, outRange = 0, outN = 0;
+
+      for (let y = box.y - margin; y < box.y + box.h + margin; y++) {
+        if (y < 0 || y >= h) continue;
+        for (let x = box.x - margin; x < box.x + box.w + margin; x++) {
+          if (x < 0 || x >= w) continue;
+          const i = y * w + x;
+          const range = maximum[i] - minimum[i];
+          const inside = x >= box.x && x < box.x + box.w && y >= box.y && y < box.y + box.h;
+          if (inside) { inMin += minimum[i]; inRange += range; inN++; }
+          else { outMin += minimum[i]; outRange += range; outN++; }
+        }
+      }
+      if (!inN || !outN) continue;
+
+      const floorLift = inMin / inN - outMin / outN;
+      const rangeDrop = outRange / outN - inRange / inN;
+      if (floorLift <= 2) continue;
+
+      const score = floorLift * Math.max(rangeDrop, 1);
+      if (!best || score > best.score) best = { box, score, floorLift, rangeDrop };
+    }
+
+    if (!best) return null;
+    const back = 1 / scale;
+    return {
+      x: Math.round(best.box.x * back),
+      y: Math.round(best.box.y * back),
+      w: Math.round(best.box.w * back),
+      h: Math.round(best.box.h * back),
+    };
+  } finally {
+    URL.revokeObjectURL(url);
+  }
+}
+
 /* ---------- painting ----------------------------------------------------- */
 
 function redrawOverlay() {
   overlayCtx.clearRect(0, 0, overlay.width, overlay.height);
   overlayCtx.strokeStyle = "rgba(255, 45, 85, 0.55)";
+  overlayCtx.fillStyle = "rgba(255, 45, 85, 0.55)";
   overlayCtx.lineCap = "round";
   overlayCtx.lineJoin = "round";
 
   for (const stroke of state.strokes) {
+    if (stroke.rect) {
+      overlayCtx.fillRect(stroke.rect.x, stroke.rect.y, stroke.rect.w, stroke.rect.h);
+      continue;
+    }
     overlayCtx.lineWidth = stroke.size;
     overlayCtx.beginPath();
     stroke.points.forEach(([x, y], i) => (i === 0 ? overlayCtx.moveTo(x, y) : overlayCtx.lineTo(x, y)));
@@ -544,6 +705,8 @@ function redrawOverlay() {
   el("undo").disabled = !has;
   el("clear").disabled = !has;
   el("run").disabled = !has;
+  // Say why the main button is off, rather than leaving a grey button unexplained.
+  el("whyDisabled").hidden = has || el("editor").hidden;
 }
 
 function pointerPosition(event) {
@@ -584,10 +747,11 @@ overlay.addEventListener("pointercancel", endStroke);
 /* ---------- loading files ------------------------------------------------ */
 
 function startEditing() {
-  redrawOverlay();
   el("dropzone").hidden = true;
   el("editor").hidden = false;
   el("reset").hidden = false;
+  el("detect").hidden = state.mode !== "video";
+  redrawOverlay();
   el("download").disabled = true;
   el("result").hidden = true;
   hideError();
@@ -679,6 +843,8 @@ function setMode(mode) {
   el("editor").hidden = true;
   el("dropzone").hidden = false;
   el("reset").hidden = true;
+  el("detect").hidden = true;
+  el("whyDisabled").hidden = true;
   el("download").disabled = true;
   el("result").hidden = true;
   el("file").value = "";
@@ -728,6 +894,39 @@ window.addEventListener("paste", (event) => {
 el("brush").addEventListener("input", (e) => (el("brushVal").textContent = e.target.value));
 el("grow").addEventListener("input", (e) => (el("growVal").textContent = e.target.value));
 el("crf").addEventListener("input", (e) => (el("crfVal").textContent = e.target.value));
+
+el("detect").addEventListener("click", async () => {
+  const button = el("detect");
+  button.disabled = true;
+  hideError();
+  try {
+    setStatus(t("st.detecting"), 0.05);
+    const box = await detectWatermark();
+    if (!box) {
+      clearStatus();
+      showError(t("err.notFound"));
+      return;
+    }
+    const pad = 4;
+    state.strokes.push({
+      rect: {
+        x: Math.max(0, box.x - pad),
+        y: Math.max(0, box.y - pad),
+        w: Math.min(base.width, box.w + pad * 2),
+        h: Math.min(base.height, box.h + pad * 2),
+      },
+    });
+    redrawOverlay();
+    setStatus(`${t("st.found")} ${box.w}×${box.h}`, 1);
+    setTimeout(clearStatus, 2500);
+  } catch (error) {
+    console.error(error);
+    clearStatus();
+    showError(error.message || t("err.generic"));
+  } finally {
+    button.disabled = false;
+  }
+});
 
 el("undo").addEventListener("click", () => {
   state.strokes.pop();
