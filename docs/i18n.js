@@ -106,6 +106,7 @@ const I18N = {
     "st.seconds": "detik.",
     "st.videoInfo": "detik",
     "st.maskAllFrames": "Mask ini dipakai untuk seluruh video",
+    "st.previewFrame": "Preview ini frame detik",
   },
 };
 
@@ -150,4 +151,5 @@ const EN_FALLBACK = {
   "st.seconds": "seconds.",
   "st.videoInfo": "seconds",
   "st.maskAllFrames": "This mask is used for the whole video",
+  "st.previewFrame": "Preview is the frame at",
 };

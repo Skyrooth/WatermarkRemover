@@ -665,8 +665,11 @@ function loadVideoFile(file) {
   video.preload = "auto";
 
   video.onloadeddata = () => {
-    // A frame from a third of the way in: more representative than a black opener.
-    video.currentTime = Math.min(1, (video.duration || 3) / 3);
+    // Near the start, so the preview matches the frame the result opens on. Taking
+    // it a third of the way in looked reasonable until a multi-shot clip made the
+    // preview and the result show different scenes, which reads as "it cut up my
+    // video".
+    video.currentTime = Math.min(0.4, (video.duration || 1) * 0.1);
   };
   video.onseeked = () => {
     state.strokes = [];
@@ -678,7 +681,8 @@ function loadVideoFile(file) {
     startEditing();
     el("hint").textContent =
       `${t("st.maskAllFrames")} — ${video.videoWidth}×${video.videoHeight}, ` +
-      `${(video.duration || 0).toFixed(1)} ${t("st.videoInfo")}.`;
+      `${(video.duration || 0).toFixed(1)} ${t("st.videoInfo")}. ` +
+      `${t("st.previewFrame")} ${video.currentTime.toFixed(1)}s.`;
   };
   video.onerror = () => {
     URL.revokeObjectURL(url);
