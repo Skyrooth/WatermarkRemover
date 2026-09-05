@@ -143,6 +143,13 @@ CSS = """
 footer { display: none !important; }
 """
 
+# Gradio's stock accent is indigo. Teal, to match the web build.
+THEME = gr.themes.Soft(
+    primary_hue=gr.themes.colors.teal,
+    secondary_hue=gr.themes.colors.teal,
+    neutral_hue=gr.themes.colors.slate,
+)
+
 with gr.Blocks(title="WMR Studio") as demo:
     gr.Markdown(
         "# WMR Studio\n"
@@ -212,5 +219,4 @@ with gr.Blocks(title="WMR Studio") as demo:
                   [vid_out, vid_file, vid_note])
 
 if __name__ == "__main__":
-    demo.launch(inbrowser=False, server_port=7861,
-                css=CSS, theme=gr.themes.Soft())
+    demo.launch(inbrowser=False, server_port=7861, css=CSS, theme=THEME)
